@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transfold"
+version = "0.1.0"
+description = "CLI tool to translate Markdown trees using the OpenRouter API"
+readme = "README.md"
+authors = [{name = "Transfold Contributors"}]
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.24,<0.28",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+yaml = ["PyYAML>=6.0"]
+
+[project.scripts]
+transfold = "transfold.cli:main"
