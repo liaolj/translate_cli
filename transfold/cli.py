@@ -43,6 +43,7 @@ class Settings:
     translate_frontmatter: bool
     dry_run: bool
     backup: bool
+    stream_writes: bool
     retry: int
     timeout: float
     cache_dir: Path
@@ -128,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, help="API request timeout in seconds", default=None)
     parser.add_argument("--cache-dir", help="Cache directory", default=None)
     parser.add_argument("--glossary", help="Glossary file (JSON or CSV)", default=None)
+    parser.add_argument(
+        "--stream-writes",
+        action=argparse.BooleanOptionalAction,
+        help="Write translated output after each segment instead of once per document",
+        default=None,
+    )
     parser.add_argument("--api-key", help="OpenRouter API key", default=None)
     parser.add_argument("--debug", action="store_true", help="Print OpenRouter request/response debug information")
     return parser
@@ -140,7 +147,7 @@ def parse_arguments(argv: Optional[List[str]] = None) -> Settings:
     load_env_file(args.env_file)
 
     config_data = load_config(args.config)
-    explicit_false = {"translate_code", "translate_frontmatter"}
+    explicit_false = {"translate_code", "translate_frontmatter", "stream_writes"}
     cli_overrides = {}
     for key, value in vars(args).items():
         if key == "config":
@@ -236,6 +243,12 @@ def parse_arguments(argv: Optional[List[str]] = None) -> Settings:
         default=False,
     )
 
+    stream_writes = _resolve_bool(
+        merged.get("stream_writes"),
+        merged.get("stream-writes"),
+        default=False,
+    )
+
     dry_run = bool(merged.get("dry_run") or merged.get("dry-run") or args.dry_run)
     backup = _resolve_bool(
         merged.get("backup"),
@@ -283,6 +296,7 @@ def parse_arguments(argv: Optional[List[str]] = None) -> Settings:
         translate_frontmatter=bool(translate_frontmatter),
         dry_run=dry_run,
         backup=backup,
+        stream_writes=bool(stream_writes),
         retry=retry,
         timeout=timeout,
         cache_dir=cache_dir,
@@ -337,33 +351,30 @@ def run(settings: Settings) -> int:
         print("No files matched the provided criteria.")
         return 0
 
-    documents = []
-    total_segments = 0
     errors: List[str] = []
 
-    for file_path in files:
-        try:
-            text = read_text(file_path)
-        except Exception as exc:
-            errors.append(f"{file_path}: {exc}")
-            continue
-        segmented = segment_document(
-            text,
-            strategy=settings.chunk_strategy,
-            max_chars=settings.max_chars,
-            preserve_code=not settings.translate_code,
-            preserve_frontmatter=not settings.translate_frontmatter,
-            split_threshold=settings.split_threshold,
-        )
-        translatable = sum(1 for seg in segmented.segments if seg.translate and seg.content.strip())
-        total_segments += translatable
-        documents.append((file_path, text, segmented))
-
     if settings.dry_run:
-        for file_path, _, segmented in documents:
+        total_segments = 0
+        processed_files = 0
+        for file_path in files:
+            try:
+                text = read_text(file_path)
+            except Exception as exc:
+                errors.append(f"{file_path}: {exc}")
+                continue
+            segmented = segment_document(
+                text,
+                strategy=settings.chunk_strategy,
+                max_chars=settings.max_chars,
+                preserve_code=not settings.translate_code,
+                preserve_frontmatter=not settings.translate_frontmatter,
+                split_threshold=settings.split_threshold,
+            )
             translatable = sum(1 for seg in segmented.segments if seg.translate and seg.content.strip())
+            total_segments += translatable
+            processed_files += 1
             print(f"[DRY RUN] {file_path.relative_to(settings.input_dir)} -> {translatable} segments")
-        print(f"Total files: {len(documents)}, segments requiring translation: {total_segments}")
+        print(f"Total files: {processed_files}, segments requiring translation: {total_segments}")
         if errors:
             print()
             print("Skipped files due to errors:")
@@ -380,15 +391,18 @@ def run(settings: Settings) -> int:
             errors.append(f"Failed to read glossary: {exc}")
 
     cache = TranslationCache(settings.cache_dir)
-    file_semaphore = asyncio.Semaphore(max(1, settings.concurrency))
-    progress = (
-        tqdm(total=total_segments, unit="segment", desc="Translating")
-        if total_segments
-        else None
-    )
+    progress: Optional[tqdm] = None
+    pending_progress = 0
+    total_segments = 0
+    documents_to_process = 0
 
     def on_progress(count: int) -> None:
-        if count and progress is not None:
+        nonlocal pending_progress, progress
+        if count <= 0:
+            return
+        if progress is None:
+            pending_progress += count
+        else:
             progress.update(count)
 
     async def on_retry(attempt: int, exc: Exception, delay: float) -> None:
@@ -414,8 +428,6 @@ def run(settings: Settings) -> int:
             debug=settings.debug,
         )
     except Exception as exc:
-        if progress is not None:
-            progress.close()
         cache.close()
         print(f"Failed to initialise translator: {exc}", file=sys.stderr)
         return 1
@@ -428,49 +440,94 @@ def run(settings: Settings) -> int:
         original: str,
         segmented: SegmentedDocument,
     ) -> None:
-        async with file_semaphore:
-            destination = _resolve_output_path(settings, file_path)
-            in_place = destination == file_path
-            backup_required = settings.backup and in_place
-            writes = 0
+        destination = _resolve_output_path(settings, file_path)
+        in_place = destination == file_path
+        backup_required = settings.backup and in_place
+        writes = 0
 
-            async def on_segment(_segment) -> None:
-                nonlocal writes
-                rendered = segmented.merge()
-                writer.submit((destination, rendered, backup_required and writes == 0))
-                writes += 1
+        async def stream_segment(_segment) -> None:
+            nonlocal writes
+            rendered = segmented.merge()
+            writer.submit((destination, rendered, backup_required and writes == 0))
+            writes += 1
 
-            try:
-                await translator.translate_segments(
-                    segmented.segments,
-                    segment_callback=on_segment,
-                )
-            except TranslationError as exc:
-                errors.append(f"{file_path}: {exc}")
-                if writes:
-                    writer.submit((destination, original, False))
-                return
+        segment_callback = stream_segment if settings.stream_writes else None
 
-            if writes == 0:
-                rendered = segmented.merge()
-                if destination != file_path or rendered != original:
-                    writer.submit((destination, rendered, backup_required))
-
-    async def process_all() -> None:
-        tasks = [
-            asyncio.create_task(process_document(path, original, segmented))
-            for path, original, segmented in documents
-        ]
-        if not tasks:
+        try:
+            await translator.translate_segments(
+                segmented.segments,
+                segment_callback=segment_callback,
+            )
+        except TranslationError as exc:
+            errors.append(f"{file_path}: {exc}")
+            if writes:
+                writer.submit((destination, original, False))
             return
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, Exception):
-                errors.append(str(result))
+
+        if writes == 0:
+            rendered = segmented.merge()
+            if destination != file_path or rendered != original:
+                writer.submit((destination, rendered, backup_required))
+
+    queue: "asyncio.Queue[tuple[Path, str, SegmentedDocument] | None]" = asyncio.Queue(
+        max(1, settings.concurrency * 2)
+    )
+    worker_count = max(1, settings.concurrency)
+
+    async def producer() -> None:
+        nonlocal documents_to_process, total_segments, progress, pending_progress
+        for file_path in files:
+            try:
+                text = read_text(file_path)
+            except Exception as exc:
+                errors.append(f"{file_path}: {exc}")
+                continue
+            segmented = segment_document(
+                text,
+                strategy=settings.chunk_strategy,
+                max_chars=settings.max_chars,
+                preserve_code=not settings.translate_code,
+                preserve_frontmatter=not settings.translate_frontmatter,
+                split_threshold=settings.split_threshold,
+            )
+            translatable = sum(1 for seg in segmented.segments if seg.translate and seg.content.strip())
+            total_segments += translatable
+            documents_to_process += 1
+
+            if progress is None and total_segments > 0:
+                progress = tqdm(total=total_segments, unit="segment", desc="Translating")
+                if pending_progress:
+                    progress.update(pending_progress)
+                    pending_progress = 0
+            elif progress is not None:
+                progress.total = total_segments
+                progress.refresh()
+
+            await queue.put((file_path, text, segmented))
+
+        for _ in range(worker_count):
+            await queue.put(None)
+
+    async def worker() -> None:
+        while True:
+            item = await queue.get()
+            if item is None:
+                queue.task_done()
+                break
+            file_path, original, segmented = item
+            try:
+                await process_document(file_path, original, segmented)
+            except Exception as exc:
+                errors.append(f"{file_path}: {exc}")
+            finally:
+                cache.flush()
+                queue.task_done()
 
     async def runner() -> None:
+        producer_task = asyncio.create_task(producer())
+        worker_tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
         try:
-            await process_all()
+            await asyncio.gather(producer_task, *worker_tasks)
         finally:
             await translator.close()
 
@@ -486,7 +543,7 @@ def run(settings: Settings) -> int:
     print()
     print("Summary")
     print("=======")
-    print(f"Files processed: {len(documents)}")
+    print(f"Files processed: {documents_to_process}")
     print(f"Segments translated: {translator.stats.total_segments}")
     print(f"Segments served from cache: {translator.stats.cached_segments}")
     print(f"API calls: {translator.stats.api_calls}")

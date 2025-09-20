@@ -84,13 +84,16 @@ class OpenRouterTranslator:
         *,
         segment_callback: Optional[SegmentCallback] = None,
     ) -> None:
+        pending: list[Awaitable[None]] = []
+
         for segment in segments:
             if not segment.translate or not segment.content.strip():
                 segment.translation = segment.content
                 if self.progress_callback:
                     self.progress_callback(1)
-                await self._emit_segment(segment_callback, segment)
+                pending.append(self._emit_segment(segment_callback, segment))
                 continue
+
             self.stats.total_segments += 1
             chunk_hash = self.cache.compute_chunk_hash(segment.content) if self.cache else None
             cache_key = (
@@ -98,6 +101,7 @@ class OpenRouterTranslator:
                 if self.cache and chunk_hash is not None
                 else None
             )
+
             if cache_key and self.cache:
                 cached = self.cache.get(cache_key)
                 if cached is not None:
@@ -105,10 +109,17 @@ class OpenRouterTranslator:
                     self.stats.cached_segments += 1
                     if self.progress_callback:
                         self.progress_callback(1)
-                    await self._emit_segment(segment_callback, segment)
+                    pending.append(self._emit_segment(segment_callback, segment))
                     continue
 
-            await self._translate_segment(segment, chunk_hash, cache_key, segment_callback)
+            pending.append(
+                self._translate_segment(segment, chunk_hash, cache_key, segment_callback)
+            )
+
+        if not pending:
+            return
+
+        await asyncio.gather(*pending)
 
     async def _translate_segment(
         self,

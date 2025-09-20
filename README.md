@@ -102,6 +102,7 @@ Key arguments:
 | `--translate-code` / `--no-translate-code` | Toggle translating fenced code blocks (default disabled). |
 | `--translate-frontmatter` / `--no-translate-frontmatter` | Toggle translating YAML front matter (default disabled). |
 | `--dry-run` | Report files and segment counts without contacting the API. |
+| `--stream-writes` / `--no-stream-writes` | Opt-in partial writes after each translated segment (default disabled; buffers until document completion for best performance). |
 | `--cache-dir` | Override the cache directory (default `.transfold-cache`). |
 | `--glossary` | Path to JSON or CSV glossary mapping source terms to fixed translations. |
 | `--retry`, `--timeout` | Control retry attempts and per-request timeout. |

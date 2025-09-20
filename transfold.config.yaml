@@ -1,5 +1,15 @@
-input: ./input
+input: /home/ubuntu/gemini-balance
 output: ./output
 target_lang: zh
-ext: [md, txt]
+ext: [md,txt]
 concurrency: 8
+chunk:
+  strategy: markdown
+  max_chars: 4000
+  split_threshold: 8000
+preserve_code: true
+preserve_frontmatter: true
+retry: 3
+timeout: 60
+cache_dir: ./.transfold-cache
+backup: true

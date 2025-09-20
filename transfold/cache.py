@@ -29,9 +29,22 @@ class TranslationCache:
         )
         self._conn.commit()
         self._lock = threading.Lock()
+        self._pending_writes = 0
+        self._commit_interval = 32
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            if self._pending_writes:
+                self._conn.commit()
+                self._pending_writes = 0
+            self._conn.close()
+
+    def flush(self) -> None:
+        with self._lock:
+            if not self._pending_writes:
+                return
+            self._conn.commit()
+            self._pending_writes = 0
 
     def compute_chunk_hash(self, content: str) -> str:
         return hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -70,4 +83,7 @@ class TranslationCache:
                 """,
                 (cache_key, chunk_hash, target_lang, model, translation, payload),
             )
-            self._conn.commit()
+            self._pending_writes += 1
+            if self._pending_writes >= self._commit_interval:
+                self._conn.commit()
+                self._pending_writes = 0
