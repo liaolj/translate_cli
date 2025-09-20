@@ -4,3 +4,11 @@ __pycache__/
 .env.local
 .pytest_cache/
 .DS_Store
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+input/
+output/
+.transfold-cache

@@ -6,6 +6,7 @@ import argparse
 import sys
 from typing import Optional
 
+from .config import load_env_file
 from .openrouter import OpenRouterClient, TranslationError
 
 
@@ -25,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=60,
         help="Request timeout in seconds (default: 60)",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print OpenRouter request/response debug information",
+    )
     return parser
 
 
@@ -33,7 +39,12 @@ def run(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        client = OpenRouterClient.from_env(env_path=args.env_file, timeout=args.timeout)
+        load_env_file(args.env_file)
+        client = OpenRouterClient.from_env(
+            env_path=args.env_file,
+            timeout=args.timeout,
+            debug=args.debug,
+        )
     except ValueError as exc:
         parser.error(str(exc))
 

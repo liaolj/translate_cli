@@ -32,6 +32,7 @@ The application relies on the following variables, which can be stored in a `.en
   `openai/gpt-4o-mini`.
 - `OPENROUTER_BASE_URL` – optional override when using a proxy instance.
 - `OPENROUTER_SITE_URL` and `OPENROUTER_APP_NAME` – optional metadata forwarded to OpenRouter.
+- `TRANSFOLD_SPLIT_THRESHOLD` – optional integer that keeps each Transfold file as a single translation when its character count stays at or below the threshold.
 
 ## Development
 
@@ -97,7 +98,7 @@ Key arguments:
 | `--source-lang` | Source language code or `auto` (default). |
 | `--model` | OpenRouter model identifier (default `openrouter/auto`). |
 | `--concurrency` | Number of in-flight OpenRouter requests (default derived from CPU count). |
-| `--max-chars` | Maximum characters per chunk before secondary splitting (default `4000`). |
+| `--max-chars` | Maximum characters per chunk before secondary splitting (default `4000`). Set `TRANSFOLD_SPLIT_THRESHOLD` in `.env` to keep smaller files as a single translation request. |
 | `--translate-code` / `--no-translate-code` | Toggle translating fenced code blocks (default disabled). |
 | `--translate-frontmatter` / `--no-translate-frontmatter` | Toggle translating YAML front matter (default disabled). |
 | `--dry-run` | Report files and segment counts without contacting the API. |
@@ -144,6 +145,7 @@ exclude:
 chunk:
   strategy: markdown
   max_chars: 4000
+  split_threshold: 8000
 preserve_code: true
 preserve_frontmatter: true
 retry: 3
@@ -169,4 +171,3 @@ During execution, Transfold displays a progress bar for translation segments, re
 ## License
 
 Distributed under the MIT License. See `LICENSE` for details.
-

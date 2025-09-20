@@ -40,6 +40,7 @@ def segment_document(
     max_chars: int = 4000,
     preserve_code: bool = True,
     preserve_frontmatter: bool = True,
+    split_threshold: Optional[int] = None,
 ) -> SegmentedDocument:
     if strategy != "markdown":
         raise ValueError(f"Unsupported segmentation strategy: {strategy}")
@@ -61,6 +62,7 @@ def segment_document(
         remaining,
         max_chars=max_chars,
         preserve_code=preserve_code,
+        split_threshold=split_threshold,
     )
     for seg in text_segments:
         seg.index = index
@@ -93,19 +95,26 @@ def _split_markdown_body(
     *,
     max_chars: int,
     preserve_code: bool,
+    split_threshold: Optional[int],
 ) -> List[Segment]:
     lines = text.splitlines(keepends=True)
     length = len(lines)
     idx = 0
     buffer: List[str] = []
     segments: List[Segment] = []
+    single_pass = (
+        split_threshold is not None
+        and split_threshold > 0
+        and len(text) <= split_threshold
+    )
+    effective_limit = max(max_chars, len(text)) if single_pass else max_chars
 
     def flush_buffer() -> None:
         nonlocal buffer
         if not buffer:
             return
         block = "".join(buffer)
-        for part in _enforce_max_chars(block, max_chars):
+        for part in _enforce_max_chars(block, effective_limit):
             segments.append(Segment(index=-1, content=part, translate=True, kind="text"))
         buffer = []
 

@@ -1,0 +1,5 @@
+input: ./input
+output: ./output
+target_lang: zh
+ext: [md, txt]
+concurrency: 8

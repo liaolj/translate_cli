@@ -3,15 +3,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import queue
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from .cache import TranslationCache
-from .chunking import segment_document
-from .config import merge_config, load_config
+from .chunking import SegmentedDocument, segment_document
+from .config import merge_config, load_config, load_env_file
 from .files import atomic_write, gather_files, read_glossary, read_text
 from .progress import tqdm
 from .translator import OpenRouterTranslator, TranslationError
@@ -35,6 +37,7 @@ class Settings:
     include: List[str]
     exclude: List[str]
     max_chars: int
+    split_threshold: Optional[int]
     chunk_strategy: str
     translate_code: bool
     translate_frontmatter: bool
@@ -45,11 +48,56 @@ class Settings:
     cache_dir: Path
     glossary: Optional[Path]
     api_key: str
+    debug: bool
 
+
+WriteTask = tuple[Path, str, bool]
+
+
+class WriterThread:
+    _SENTINEL: WriteTask | None = None
+
+    def __init__(self) -> None:
+        self._queue: "queue.Queue[WriteTask | None]" = queue.Queue()
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._backed_up: set[Path] = set()
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def submit(self, task: WriteTask) -> None:
+        self._queue.put(task)
+
+    def close(self) -> None:
+        self._queue.put(self._SENTINEL)
+        self._queue.join()
+        self._thread.join()
+
+    def _worker(self) -> None:
+        while True:
+            task = self._queue.get()
+            if task is self._SENTINEL:
+                self._queue.task_done()
+                break
+            path, content, backup = task
+            try:
+                effective_backup = backup and path not in self._backed_up
+                atomic_write(path, content, backup=effective_backup)
+                if effective_backup:
+                    self._backed_up.add(path)
+            except Exception as exc:  # pragma: no cover - worker should not raise
+                print(f"Failed to write {path}: {exc}", file=sys.stderr)
+            finally:
+                self._queue.task_done()
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transfold – translate Markdown at scale using OpenRouter")
     parser.add_argument("--config", help="Path to a configuration file", default=None)
+    parser.add_argument(
+        "--env-file",
+        help="Path to a .env file containing OpenRouter credentials",
+        default=None,
+    )
     parser.add_argument("--input", help="Input directory", default=None)
     parser.add_argument("--output", help="Output directory (mirror structure)")
     parser.add_argument("--ext", action="append", help="File extensions to include (comma separated)", default=None)
@@ -81,12 +129,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-dir", help="Cache directory", default=None)
     parser.add_argument("--glossary", help="Glossary file (JSON or CSV)", default=None)
     parser.add_argument("--api-key", help="OpenRouter API key", default=None)
+    parser.add_argument("--debug", action="store_true", help="Print OpenRouter request/response debug information")
     return parser
 
 
 def parse_arguments(argv: Optional[List[str]] = None) -> Settings:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    load_env_file(args.env_file)
 
     config_data = load_config(args.config)
     explicit_false = {"translate_code", "translate_frontmatter"}
@@ -125,7 +176,12 @@ def parse_arguments(argv: Optional[List[str]] = None) -> Settings:
         parser.error("--target-lang is required")
 
     source_lang = (merged.get("source_lang") or merged.get("source-lang") or args.source_lang or "auto")
-    model = merged.get("model") or DEFAULT_MODEL
+    model = (
+        merged.get("model")
+        or os.environ.get("OPENROUTER_MODEL")
+        or os.environ.get("MODEL")
+        or DEFAULT_MODEL
+    )
 
     concurrency = merged.get("concurrency")
     if concurrency is None:
@@ -143,6 +199,21 @@ def parse_arguments(argv: Optional[List[str]] = None) -> Settings:
         or (chunk_config or {}).get("max-chars")
         or DEFAULT_MAX_CHARS
     )
+    split_threshold_value = (
+        merged.get("split_threshold")
+        or merged.get("split-threshold")
+        or (chunk_config or {}).get("split_threshold")
+        or (chunk_config or {}).get("split-threshold")
+        or os.environ.get("TRANSFOLD_SPLIT_THRESHOLD")
+    )
+    split_threshold: Optional[int] = None
+    if split_threshold_value not in (None, ""):
+        try:
+            split_threshold = int(split_threshold_value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            parser.error("split_threshold must be an integer")
+        if split_threshold <= 0:
+            parser.error("split_threshold must be a positive integer")
     chunk_strategy = (
         merged.get("chunk_strategy")
         or merged.get("chunk-strategy")
@@ -206,6 +277,7 @@ def parse_arguments(argv: Optional[List[str]] = None) -> Settings:
         include=include,
         exclude=exclude,
         max_chars=max_chars,
+        split_threshold=split_threshold,
         chunk_strategy=str(chunk_strategy),
         translate_code=bool(translate_code),
         translate_frontmatter=bool(translate_frontmatter),
@@ -216,6 +288,7 @@ def parse_arguments(argv: Optional[List[str]] = None) -> Settings:
         cache_dir=cache_dir,
         glossary=glossary,
         api_key=str(api_key),
+        debug=bool(merged.get("debug") or args.debug),
     )
 
 
@@ -280,6 +353,7 @@ def run(settings: Settings) -> int:
             max_chars=settings.max_chars,
             preserve_code=not settings.translate_code,
             preserve_frontmatter=not settings.translate_frontmatter,
+            split_threshold=settings.split_threshold,
         )
         translatable = sum(1 for seg in segmented.segments if seg.translate and seg.content.strip())
         total_segments += translatable
@@ -306,6 +380,7 @@ def run(settings: Settings) -> int:
             errors.append(f"Failed to read glossary: {exc}")
 
     cache = TranslationCache(settings.cache_dir)
+    file_semaphore = asyncio.Semaphore(max(1, settings.concurrency))
     progress = (
         tqdm(total=total_segments, unit="segment", desc="Translating")
         if total_segments
@@ -336,6 +411,7 @@ def run(settings: Settings) -> int:
             glossary=glossary,
             progress_callback=on_progress,
             retry_callback=on_retry,
+            debug=settings.debug,
         )
     except Exception as exc:
         if progress is not None:
@@ -344,27 +420,64 @@ def run(settings: Settings) -> int:
         print(f"Failed to initialise translator: {exc}", file=sys.stderr)
         return 1
 
-    async def process() -> None:
-        for file_path, original, segmented in documents:
+    writer = WriterThread()
+    writer.start()
+
+    async def process_document(
+        file_path: Path,
+        original: str,
+        segmented: SegmentedDocument,
+    ) -> None:
+        async with file_semaphore:
+            destination = _resolve_output_path(settings, file_path)
+            in_place = destination == file_path
+            backup_required = settings.backup and in_place
+            writes = 0
+
+            async def on_segment(_segment) -> None:
+                nonlocal writes
+                rendered = segmented.merge()
+                writer.submit((destination, rendered, backup_required and writes == 0))
+                writes += 1
+
             try:
-                await translator.translate_segments(segmented.segments)
+                await translator.translate_segments(
+                    segmented.segments,
+                    segment_callback=on_segment,
+                )
             except TranslationError as exc:
                 errors.append(f"{file_path}: {exc}")
-                continue
-            rendered = segmented.merge()
-            destination = _resolve_output_path(settings, file_path)
-            if destination == file_path:
-                backup = settings.backup
-            else:
-                backup = False
-            if rendered == original:
-                continue
-            atomic_write(destination, rendered, backup=backup)
+                if writes:
+                    writer.submit((destination, original, False))
+                return
+
+            if writes == 0:
+                rendered = segmented.merge()
+                if destination != file_path or rendered != original:
+                    writer.submit((destination, rendered, backup_required))
+
+    async def process_all() -> None:
+        tasks = [
+            asyncio.create_task(process_document(path, original, segmented))
+            for path, original, segmented in documents
+        ]
+        if not tasks:
+            return
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                errors.append(str(result))
+
+    async def runner() -> None:
+        try:
+            await process_all()
+        finally:
+            await translator.close()
 
     try:
-        asyncio.run(process())
+        asyncio.run(runner())
     finally:
-        asyncio.run(translator.close())
+        writer.close()
         cache.close()
         if progress is not None:
             progress.close()

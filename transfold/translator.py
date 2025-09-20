@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import random
 import textwrap
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Iterable, List, Optional
+from typing import Awaitable, Callable, List, Optional
 
 try:  # pragma: no cover - optional dependency
     import httpx  # type: ignore
@@ -31,6 +32,7 @@ class TranslatorStats:
 
 RetryCallback = Callable[[int, Exception, float], Awaitable[None]]
 ProgressCallback = Callable[[int], None]
+SegmentCallback = Callable[[Segment], Awaitable[None] | None]
 
 
 class OpenRouterTranslator:
@@ -51,6 +53,7 @@ class OpenRouterTranslator:
         progress_callback: Optional[ProgressCallback] = None,
         retry_callback: Optional[RetryCallback] = None,
         system_prompt: Optional[str] = None,
+        debug: bool = False,
     ) -> None:
         self.api_key = api_key
         self.model = model
@@ -63,6 +66,7 @@ class OpenRouterTranslator:
         self.progress_callback = progress_callback
         self.retry_callback = retry_callback
         self.system_prompt = system_prompt or self._default_system_prompt()
+        self.debug = debug
         if httpx is None:
             raise RuntimeError(
                 "httpx is required to use the OpenRouter translator. Install transfold with its dependencies."
@@ -74,13 +78,18 @@ class OpenRouterTranslator:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def translate_segments(self, segments: List[Segment]) -> None:
-        tasks: List[asyncio.Task[None]] = []
+    async def translate_segments(
+        self,
+        segments: List[Segment],
+        *,
+        segment_callback: Optional[SegmentCallback] = None,
+    ) -> None:
         for segment in segments:
             if not segment.translate or not segment.content.strip():
                 segment.translation = segment.content
                 if self.progress_callback:
                     self.progress_callback(1)
+                await self._emit_segment(segment_callback, segment)
                 continue
             self.stats.total_segments += 1
             chunk_hash = self.cache.compute_chunk_hash(segment.content) if self.cache else None
@@ -96,21 +105,17 @@ class OpenRouterTranslator:
                     self.stats.cached_segments += 1
                     if self.progress_callback:
                         self.progress_callback(1)
+                    await self._emit_segment(segment_callback, segment)
                     continue
 
-            task = asyncio.create_task(
-                self._translate_segment(segment, chunk_hash, cache_key)
-            )
-            tasks.append(task)
-
-        if tasks:
-            await asyncio.gather(*tasks)
+            await self._translate_segment(segment, chunk_hash, cache_key, segment_callback)
 
     async def _translate_segment(
         self,
         segment: Segment,
         chunk_hash: Optional[str],
         cache_key: Optional[str],
+        segment_callback: Optional[SegmentCallback],
     ) -> None:
         last_error: Optional[Exception] = None
         for attempt in range(1, self.retry + 1):
@@ -133,6 +138,7 @@ class OpenRouterTranslator:
                 self.stats.api_calls += 1
                 if self.progress_callback:
                     self.progress_callback(1)
+                await self._emit_segment(segment_callback, segment)
                 return
             except Exception as exc:  # broad catch to honour retry semantics
                 last_error = exc
@@ -161,7 +167,16 @@ class OpenRouterTranslator:
                 {"role": "user", "content": self._user_prompt(text)},
             ],
         }
+        if self.debug:
+            preview = textwrap.shorten(text.replace("\n", " "), width=120, placeholder="...")
+            print(
+                f"[debug] OpenRouter request model={self.model} target={self.target_lang} chars={len(text)} preview='{preview}'"
+            )
         response = await self._client.post(self.endpoint, json=payload, headers=headers)
+        if self.debug:
+            print(
+                f"[debug] OpenRouter response status={response.status_code} request_id={response.headers.get('X-Request-Id', 'n/a')}"
+            )
         if response.status_code >= 500 or response.status_code == 429:
             raise httpx.HTTPStatusError(
                 f"Server error: {response.status_code} {response.text}", request=response.request, response=response
@@ -171,12 +186,43 @@ class OpenRouterTranslator:
                 f"OpenRouter API returned status {response.status_code}: {response.text}"
             )
         data = response.json()
+        if self.debug and isinstance(data, dict):
+            usage = data.get("usage") or {}
+            print(f"[debug] OpenRouter usage={usage}")
         try:
             message = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as exc:  # pragma: no cover - depends on API
             raise TranslationError("Unexpected response format from OpenRouter API") from exc
+        translation = self._normalize_content(message)
+        if not translation.strip():
+            raise TranslationError("OpenRouter returned an empty translation")
+        if self.debug:
+            preview = textwrap.shorten(translation.replace("\n", " "), width=120, placeholder="...")
+            print(f"[debug] OpenRouter translation preview='{preview}'")
         usage = data.get("usage") if isinstance(data, dict) else None
-        return message.strip(), usage
+        return translation, usage
+
+    def _normalize_content(self, message: object) -> str:
+        if isinstance(message, list):
+            parts: List[str] = []
+            for item in message:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text", "")))
+                else:
+                    parts.append(str(item))
+            return "".join(parts)
+        return str(message)
+
+    async def _emit_segment(
+        self,
+        callback: Optional[SegmentCallback],
+        segment: Segment,
+    ) -> None:
+        if callback is None:
+            return
+        result = callback(segment)
+        if inspect.isawaitable(result):
+            await result
 
     def _default_system_prompt(self) -> str:
         glossary_text = ""

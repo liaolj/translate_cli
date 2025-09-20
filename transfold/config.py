@@ -23,6 +23,8 @@ DEFAULT_CONFIG_FILENAMES: tuple[str, ...] = (
     "transfold.config.toml",
 )
 
+_DEFAULT_ENV_PATH = Path(".env")
+
 
 class ConfigError(RuntimeError):
     """Raised when a configuration file cannot be parsed."""
@@ -103,3 +105,41 @@ def env_default(key: str, default: Optional[str] = None) -> Optional[str]:
     """Retrieve a configuration default from the environment."""
 
     return os.environ.get(key, default)
+
+
+def load_env_file(path: Optional[Path | str] = None) -> None:
+    """Load environment variables from a ``.env`` file without overriding existing values."""
+
+    env_path: Path
+    if path is None:
+        env_path = _DEFAULT_ENV_PATH
+    elif isinstance(path, Path):
+        env_path = path
+    else:
+        env_path = Path(path)
+
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key:
+            continue
+
+        if key in os.environ:
+            continue
+
+        normalized = value.strip()
+        if (
+            len(normalized) >= 2
+            and normalized[0] in {'"', "'"}
+            and normalized[-1] == normalized[0]
+        ):
+            normalized = normalized[1:-1]
+
+        os.environ[key] = normalized

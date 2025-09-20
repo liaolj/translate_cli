@@ -67,7 +67,8 @@ class OpenRouterConfig:
             before reading values from the environment.
         """
 
-        load_env_file(env_path)
+        if env_path is not None:
+            load_env_file(env_path)
 
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:

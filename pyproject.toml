@@ -20,3 +20,9 @@ yaml = ["PyYAML>=6.0"]
 
 [project.scripts]
 transfold = "transfold.cli:main"
+
+[tool.setuptools]
+packages = [
+    "translate_cli",
+    "transfold",
+]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from typing import Dict, Iterable, List, Optional
 from urllib import error, request
 
@@ -39,14 +40,21 @@ def _normalize_messages(content: str, *, source_language: Optional[str], target_
 class OpenRouterClient:
     """Simple wrapper around the OpenRouter chat completions API."""
 
-    def __init__(self, config: OpenRouterConfig, *, timeout: int = 60) -> None:
+    def __init__(self, config: OpenRouterConfig, *, timeout: int = 60, debug: bool = False) -> None:
         self._config = config
         self._timeout = timeout
+        self._debug = debug
 
     @classmethod
-    def from_env(cls, *, env_path: Optional[str] = None, timeout: int = 60) -> "OpenRouterClient":
+    def from_env(
+        cls,
+        *,
+        env_path: Optional[str] = None,
+        timeout: int = 60,
+        debug: bool = False,
+    ) -> "OpenRouterClient":
         config = OpenRouterConfig.from_env(env_path=env_path)
-        return cls(config, timeout=timeout)
+        return cls(config, timeout=timeout, debug=debug)
 
     # The return type is intentionally loose because downstream consumers may
     # choose to post-process the output.
@@ -82,7 +90,17 @@ class OpenRouterClient:
             "messages": messages,
         }
 
+        if self._debug:
+            preview = textwrap.shorten(text.replace("\n", " "), width=120, placeholder="...")
+            print(
+                f"[debug] OpenRouter request model={self._config.model} target={target_language}"
+                f" chars={len(text)} preview='{preview}'"
+            )
+
         response_json = self._post_json(payload)
+        if self._debug and isinstance(response_json, dict):
+            usage = response_json.get("usage") or {}
+            print(f"[debug] OpenRouter response usage={usage}")
         try:
             choices = response_json["choices"]
             first_choice = choices[0]
