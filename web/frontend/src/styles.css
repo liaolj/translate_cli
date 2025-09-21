@@ -150,6 +150,10 @@ button {
   gap: 32px;
 }
 
+.page--wide {
+  max-width: none;
+}
+
 .surface {
   background: var(--surface);
   border: 1px solid var(--border-color);

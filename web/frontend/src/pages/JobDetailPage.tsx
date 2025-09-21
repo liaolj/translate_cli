@@ -44,6 +44,7 @@ function JobDetailPage() {
 
   useEffect(() => {
     if (job?.status !== "running") return;
+    setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [job?.status]);
@@ -52,11 +53,17 @@ function JobDetailPage() {
     if (!job?.started_at) return null;
     const startedAt = new Date(job.started_at).getTime();
     if (Number.isNaN(startedAt)) return null;
-    const finishedAt = job.finished_at ? new Date(job.finished_at).getTime() : now;
-    if (Number.isNaN(finishedAt)) return null;
-    const diff = (finishedAt - startedAt) / 1000;
+    const referenceTimestamp = job.finished_at
+      ? new Date(job.finished_at).getTime()
+      : job.updated_at
+        ? new Date(job.updated_at).getTime()
+        : null;
+    const reference = referenceTimestamp && !Number.isNaN(referenceTimestamp) ? referenceTimestamp : startedAt;
+    const baseDiff = (reference - startedAt) / 1000;
+    const liveDiff = !job.finished_at && job.status === "running" ? (now - reference) / 1000 : 0;
+    const diff = baseDiff + liveDiff;
     return diff > 0 ? diff : 0;
-  }, [job?.started_at, job?.finished_at, now]);
+  }, [job?.started_at, job?.updated_at, job?.finished_at, job?.status, now]);
 
   const elapsedLabel = job?.status === "completed" ? "总耗时" : "已执行时间";
 
@@ -100,7 +107,7 @@ function JobDetailPage() {
   }
 
   return (
-    <div className="page">
+    <div className="page page--wide">
       <section className="surface">
         <header className="job-header">
           <div>
