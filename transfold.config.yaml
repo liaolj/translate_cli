@@ -1,4 +1,6 @@
 input: /home/ubuntu/temp/spec-kit
+output: /home/ubuntu/ai-ws/translate_cli/output/spec-kit
+source_lang: en
 target_lang: zh
 ext: [md]
 concurrency: 8

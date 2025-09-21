@@ -9,11 +9,11 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Literal
 
 from .chunking import SegmentedDocument, segment_document
 from .config import merge_config, load_config, load_env_file
-from .files import atomic_write, gather_files, read_glossary, read_text
+from .files import atomic_write, gather_files, read_glossary, read_text, ensure_parent
 from .progress import tqdm
 from .translator import OpenRouterTranslator, TranslationError
 
@@ -54,7 +54,8 @@ class Settings:
     batch_segments: int
 
 
-WriteTask = tuple[Path, str, bool]
+WriteMode = Literal["replace", "append"]
+WriteTask = tuple[Path, str, bool, WriteMode]
 
 
 class WriterThread:
@@ -82,8 +83,14 @@ class WriterThread:
             if task is self._SENTINEL:
                 self._queue.task_done()
                 break
-            path, content, backup = task
+            path, content, backup, mode = task
             try:
+                if mode == "append":
+                    ensure_parent(path)
+                    with path.open("a", encoding="utf-8", newline="") as handle:
+                        handle.write(content)
+                    continue
+
                 effective_backup = backup and path not in self._backed_up
                 atomic_write(path, content, backup=effective_backup)
                 if effective_backup:
@@ -141,6 +148,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", help="OpenRouter API key", default=None)
     parser.add_argument("--debug", action="store_true", help="Print OpenRouter request/response debug information")
     return parser
+
+
+async def read_and_segment_async(
+    path: Path,
+    *,
+    settings: "Settings",
+    read_text_fn = read_text,
+    segment_document_fn = segment_document,
+) -> tuple[str, SegmentedDocument, int]:
+    """Read and segment a document without blocking the event loop."""
+
+    def _work() -> tuple[str, SegmentedDocument, int]:
+        text = read_text_fn(path)
+        segmented = segment_document_fn(
+            text,
+            strategy=settings.chunk_strategy,
+            max_chars=settings.max_chars,
+            preserve_code=not settings.translate_code,
+            preserve_frontmatter=not settings.translate_frontmatter,
+            split_threshold=settings.split_threshold,
+        )
+        translatable = sum(
+            1
+            for seg in segmented.segments
+            if seg.translate and seg.content.strip()
+        )
+        return text, segmented, translatable
+
+    return await asyncio.to_thread(_work)
 
 
 def parse_arguments(argv: Optional[List[str]] = None) -> Settings:
@@ -461,11 +497,29 @@ def run(settings: Settings) -> int:
         in_place = destination == file_path
         backup_required = settings.backup and in_place
         writes = 0
+        next_emit_index = 0
+        wrote_initial_chunk = False
+
+        def _collect_ready_chunk() -> str:
+            nonlocal next_emit_index
+            ready: List[str] = []
+            total = len(segmented.segments)
+            while next_emit_index < total:
+                seg = segmented.segments[next_emit_index]
+                if seg.translate and seg.translation is None:
+                    break
+                ready.append(seg.output())
+                next_emit_index += 1
+            return "".join(ready)
 
         async def stream_segment(_segment) -> None:
-            nonlocal writes
-            rendered = segmented.merge()
-            writer.submit((destination, rendered, backup_required and writes == 0))
+            nonlocal writes, wrote_initial_chunk
+            chunk = _collect_ready_chunk()
+            if not chunk:
+                return
+            mode: WriteMode = "replace" if not wrote_initial_chunk else "append"
+            writer.submit((destination, chunk, backup_required and not wrote_initial_chunk, mode))
+            wrote_initial_chunk = True
             writes += 1
 
         segment_callback = stream_segment if settings.stream_writes else None
@@ -478,13 +532,13 @@ def run(settings: Settings) -> int:
         except TranslationError as exc:
             errors.append(f"{file_path}: {exc}")
             if writes:
-                writer.submit((destination, original, False))
+                writer.submit((destination, original, False, "replace"))
             return
 
         if writes == 0:
             rendered = segmented.merge()
             if destination != file_path or rendered != original:
-                writer.submit((destination, rendered, backup_required))
+                writer.submit((destination, rendered, backup_required, "replace"))
 
     queue: "asyncio.Queue[tuple[Path, str, SegmentedDocument] | None]" = asyncio.Queue(
         max(1, settings.concurrency * 2)
@@ -495,19 +549,13 @@ def run(settings: Settings) -> int:
         nonlocal documents_to_process, total_segments, progress, pending_progress
         for file_path in files:
             try:
-                text = read_text(file_path)
+                text, segmented, translatable = await read_and_segment_async(
+                    file_path,
+                    settings=settings,
+                )
             except Exception as exc:
                 errors.append(f"{file_path}: {exc}")
                 continue
-            segmented = segment_document(
-                text,
-                strategy=settings.chunk_strategy,
-                max_chars=settings.max_chars,
-                preserve_code=not settings.translate_code,
-                preserve_frontmatter=not settings.translate_frontmatter,
-                split_threshold=settings.split_threshold,
-            )
-            translatable = sum(1 for seg in segmented.segments if seg.translate and seg.content.strip())
             total_segments += translatable
             documents_to_process += 1
 

@@ -19,6 +19,22 @@ class TranslationError(RuntimeError):
     pass
 
 
+class BatchSegmentMismatch(TranslationError):
+    def __init__(
+        self,
+        *,
+        expected: int,
+        actual: int,
+        raw: str,
+        usage: Optional[dict] = None,
+    ) -> None:
+        super().__init__("OpenRouter batch translation did not return the expected number of segments")
+        self.expected = expected
+        self.actual = actual
+        self.raw = raw
+        self.usage = usage
+
+
 @dataclass
 class TranslatorStats:
     total_segments: int = 0
@@ -49,6 +65,7 @@ class OpenRouterTranslator:
         concurrency: int = 4,
         max_batch_chars: int = 16000,
         max_batch_segments: int = 8,
+        max_pending_batches: Optional[int] = None,
         glossary: Optional[dict[str, str]] = None,
         progress_callback: Optional[ProgressCallback] = None,
         retry_callback: Optional[RetryCallback] = None,
@@ -69,12 +86,15 @@ class OpenRouterTranslator:
         self.debug = debug
         self.max_batch_chars = max(1, max_batch_chars)
         self.max_batch_segments = max(1, max_batch_segments)
+        pending_batches = max_pending_batches if max_pending_batches is not None else max(1, concurrency * 2)
+        self.max_pending_batches = max(1, pending_batches)
         if httpx is None:
             raise RuntimeError(
                 "httpx is required to use the OpenRouter translator. Install transfold with its dependencies."
             )
         self._client = httpx.AsyncClient(timeout=timeout)
         self._semaphore = asyncio.Semaphore(max(1, concurrency))
+        self._pending_batches = asyncio.Semaphore(self.max_pending_batches)
         self.stats = TranslatorStats()
 
     async def close(self) -> None:
@@ -86,15 +106,32 @@ class OpenRouterTranslator:
         *,
         segment_callback: Optional[SegmentCallback] = None,
     ) -> None:
-        pending: list[Awaitable[None]] = []
+        tasks: set[asyncio.Task[None]] = set()
         batch: list[Segment] = []
         batch_chars = 0
 
-        def flush_batch() -> None:
+        async def schedule_batch(batch_copy: list[Segment]) -> None:
+            await self._pending_batches.acquire()
+
+            async def runner() -> None:
+                try:
+                    await self._translate_batch(batch_copy, segment_callback)
+                finally:
+                    self._pending_batches.release()
+
+            task = asyncio.create_task(runner())
+            tasks.add(task)
+
+            def _cleanup(_t: asyncio.Task[None]) -> None:
+                tasks.discard(_t)
+
+            task.add_done_callback(_cleanup)
+
+        async def flush_batch() -> None:
             nonlocal batch, batch_chars
             if not batch:
                 return
-            pending.append(self._translate_batch(list(batch), segment_callback))
+            await schedule_batch(list(batch))
             batch = []
             batch_chars = 0
 
@@ -103,7 +140,9 @@ class OpenRouterTranslator:
                 segment.translation = segment.content
                 if self.progress_callback:
                     self.progress_callback(1)
-                pending.append(self._emit_segment(segment_callback, segment))
+                emit_result = self._emit_segment(segment_callback, segment)
+                if inspect.isawaitable(emit_result):
+                    await emit_result
                 continue
 
             self.stats.total_segments += 1
@@ -115,17 +154,17 @@ class OpenRouterTranslator:
                     or batch_chars + content_length > self.max_batch_chars
                 )
             ):
-                flush_batch()
+                await flush_batch()
 
             batch.append(segment)
             batch_chars += content_length
 
-        flush_batch()
+        await flush_batch()
 
-        if not pending:
+        if not tasks:
             return
 
-        await asyncio.gather(*pending)
+        await asyncio.gather(*tasks)
 
     async def _translate_batch(
         self,
@@ -137,6 +176,36 @@ class OpenRouterTranslator:
             try:
                 async with self._semaphore:
                     translations, usage = await self._request_batch(batch)
+            except BatchSegmentMismatch as mismatch:
+                if mismatch.usage:
+                    self.stats.prompt_tokens += mismatch.usage.get("prompt_tokens", 0)
+                    self.stats.completion_tokens += mismatch.usage.get("completion_tokens", 0)
+                self.stats.api_calls += 1
+                self.stats.batches += 1
+                if self.debug:
+                    preview = textwrap.shorten(
+                        mismatch.raw.replace("\n", " "),
+                        width=120,
+                        placeholder="...",
+                    )
+                    print(
+                        "[debug] OpenRouter batch mismatch expected="
+                        f"{mismatch.expected} actual={mismatch.actual} preview='{preview}'"
+                    )
+                await self._translate_batch_individually(batch, segment_callback)
+                return
+            except Exception as exc:  # broad catch to honour retry semantics
+                last_error = exc
+                if attempt >= self.retry:
+                    break
+                self.stats.retries += 1
+                delay = min(30.0, 2 ** (attempt - 1))
+                # jitter between 0.1 and 0.5 seconds to avoid thundering herd
+                jitter = random.uniform(0.1, 0.5)
+                if self.retry_callback:
+                    await self.retry_callback(attempt, exc, delay + jitter)
+                await asyncio.sleep(delay + jitter)
+            else:
                 if len(translations) != len(batch):
                     raise TranslationError(
                         "OpenRouter returned a mismatched number of translations"
@@ -155,18 +224,23 @@ class OpenRouterTranslator:
                     ]
                 )
                 return
-            except Exception as exc:  # broad catch to honour retry semantics
-                last_error = exc
-                if attempt >= self.retry:
-                    break
-                self.stats.retries += 1
-                delay = min(30.0, 2 ** (attempt - 1))
-                # jitter between 0.1 and 0.5 seconds to avoid thundering herd
-                jitter = random.uniform(0.1, 0.5)
-                if self.retry_callback:
-                    await self.retry_callback(attempt, exc, delay + jitter)
-                await asyncio.sleep(delay + jitter)
         raise TranslationError(str(last_error) if last_error else "Unknown error")
+
+    async def _translate_batch_individually(
+        self,
+        batch: List[Segment],
+        segment_callback: Optional[SegmentCallback],
+    ) -> None:
+        for segment in batch:
+            async with self._semaphore:
+                translation, usage = await self._request_single(segment.content)
+            if usage:
+                self.stats.prompt_tokens += usage.get("prompt_tokens", 0)
+                self.stats.completion_tokens += usage.get("completion_tokens", 0)
+            self.stats.api_calls += 1
+            if self.progress_callback:
+                self.progress_callback(1)
+            await self._apply_translation(segment_callback, segment, translation)
 
     async def _apply_translation(
         self,
@@ -182,7 +256,6 @@ class OpenRouterTranslator:
             translation, usage = await self._request_single(batch[0].content)
             return [translation], usage
 
-        delimiter = self._batch_delimiter
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -219,14 +292,18 @@ class OpenRouterTranslator:
                 f"OpenRouter API returned status {response.status_code}: {response.text}"
             )
         data = response.json()
-        if self.debug and isinstance(data, dict):
-            usage = data.get("usage") or {}
+        usage = data.get("usage") if isinstance(data, dict) else None
+        if self.debug and usage is not None:
             print(f"[debug] OpenRouter usage={usage}")
         try:
             message = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as exc:  # pragma: no cover - depends on API
             raise TranslationError("Unexpected response format from OpenRouter API") from exc
-        translations = self._parse_batch_response(message, len(batch))
+        try:
+            translations = self._parse_batch_response(message, len(batch))
+        except BatchSegmentMismatch as mismatch:
+            mismatch.usage = usage
+            raise
         if self.debug:
             preview = textwrap.shorten(
                 " ".join(t.replace("\n", " ") for t in translations),
@@ -234,7 +311,6 @@ class OpenRouterTranslator:
                 placeholder="...",
             )
             print(f"[debug] OpenRouter batch translation preview='{preview}'")
-        usage = data.get("usage") if isinstance(data, dict) else None
         return translations, usage
 
     async def _request_single(self, text: str) -> tuple[str, Optional[dict]]:
@@ -310,17 +386,17 @@ class OpenRouterTranslator:
     def _parse_batch_response(self, message: object, expected: int) -> List[str]:
         text = self._normalize_content(message)
         parts = text.split(self._batch_delimiter)
-        if len(parts) != expected:
-            raise TranslationError(
-                "OpenRouter batch translation did not return the expected number of segments"
-            )
         results: List[str] = []
         for item in parts:
-            if not item.strip():
-                raise TranslationError(
-                    "OpenRouter batch translation returned an empty segment"
-                )
-            results.append(item.strip("\n"))
+            candidate = item.strip("\n")
+            if candidate.strip():
+                results.append(candidate)
+        if len(results) != expected:
+            raise BatchSegmentMismatch(
+                expected=expected,
+                actual=len(results),
+                raw=text,
+            )
         return results
 
     def _normalize_content(self, message: object) -> str:

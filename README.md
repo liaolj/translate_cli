@@ -1,82 +1,50 @@
+# translate_cli / Transfold
 
-# translate_cli
+translate_cli 提供面向单条文本的命令行翻译工具，而 Transfold 则面向批量文档翻译，整体围绕 OpenRouter API 构建，可用于高质量技术文档、博客或产品手册的多语言化。
 
-A lightweight command line interface that translates text using the [OpenRouter](https://openrouter.ai) API.
+## 核心能力概览
 
-## Quick start
+- **单次调用 CLI**：`python -m translate_cli "Hello" fr` 可直接将一条字符串翻译成法语。
+- **批量翻译引擎**：`transfold` 支持递归扫描目录、拆分 Markdown 段落、并行调用 OpenRouter。
+- **可配置化**：通过 `.env` 与 `transfold.config.{yaml,json,toml}` 控制模型、并发、批量大小、过滤规则等。
+- **安全退避机制**：当 OpenRouter 批量响应段落数与请求不匹配时，会自动回退到逐段请求，确保文档完整译出。
+- **结构保留**：默认不翻译代码块、内联代码、URL 和 front matter，可按需切换。
 
-1. Copy `.env_example` to `.env` and fill in your credentials:
+## 快速开始
+
+1. 拷贝示例环境变量并填写：
 
    ```bash
    cp .env_example .env
-   # then edit .env to set OPENROUTER_API_KEY and MODEL
+   # 编辑 .env 设置 OPENROUTER_API_KEY、MODEL、可选代理配置等
    ```
 
-2. Create a virtual environment and install the requirements if needed (no third-party
-   dependencies are required for the core functionality).
-
-3. Run the CLI:
+2. 创建虚拟环境并安装依赖（推荐可选 YAML 支持）：
 
    ```bash
-   python -m translate_cli "Hello world" French
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -e .[yaml]
    ```
 
-   Use `python -m translate_cli --help` to view all available options.
+3. 验证命令行：
 
-## Environment variables
+   ```bash
+   python -m translate_cli "Hello world" fr
+   python -m transfold.cli --input docs --target-lang es --dry-run
+   ```
 
-The application relies on the following variables, which can be stored in a `.env` file:
+## 关键环境变量
 
-- `OPENROUTER_API_KEY` – required API key generated from the OpenRouter dashboard.
-- `MODEL` (or `OPENROUTER_MODEL`) – required model identifier such as `openrouter/auto` or
-  `openai/gpt-4o-mini`.
-- `OPENROUTER_BASE_URL` – optional override when using a proxy instance.
-- `OPENROUTER_SITE_URL` and `OPENROUTER_APP_NAME` – optional metadata forwarded to OpenRouter.
-- `TRANSFOLD_SPLIT_THRESHOLD` – optional integer that keeps each Transfold file as a single translation when its character count stays at or below the threshold.
+| 变量名 | 说明 |
+| ------ | ---- |
+| `OPENROUTER_API_KEY` | **必填**，OpenRouter 控制台生成的密钥。 |
+| `MODEL` / `OPENROUTER_MODEL` | **必填**，模型标识，如 `openrouter/auto`、`openai/gpt-4o-mini`。 |
+| `OPENROUTER_BASE_URL` | 可选，自建代理或中转地址。 |
+| `OPENROUTER_SITE_URL`、`OPENROUTER_APP_NAME` | 可选，随请求发送的鉴别信息。 |
+| `TRANSFOLD_SPLIT_THRESHOLD` | 可选，低于阈值的文件不拆分，直接作为单次翻译提交。 |
 
-## Development
-
-Run the unit tests with:
-
-```bash
-python -m pytest
-```
-
-The tests include coverage for the `.env` loader and the HTTP client without performing
-real network requests.
-
-# Transfold
-
-Transfold is a command-line utility that recursively scans a directory tree, translates Markdown (or other text-based) files via the OpenRouter API, and writes the results back in-place or to a mirror output directory. The tool is designed for technical documentation workflows and keeps fenced code blocks, inline code and YAML front matter intact by default.
-
-## Features
-
-- Recursive discovery of files with configurable extensions, include and exclude patterns.
-- Chunk-aware translation pipeline that respects Markdown structure and API character limits.
-- Concurrent OpenRouter requests with exponential backoff and retry handling.
-- Atomic file writes with optional `.bak` backups when overwriting source files.
-- Batched requests that translate multiple segments per OpenRouter call, reducing latency at scale.
-- Optional glossary ingestion (JSON or CSV) to enforce domain terminology.
-- Dry-run mode for auditing which files and segments would be processed.
-- Configurable via CLI flags or a `transfold.config.{yaml,json,toml}` file.
-
-## Installation
-
-The project ships with a `pyproject.toml`. Install the CLI (and optional YAML support) with:
-
-```bash
-pip install .
-# or, for YAML configuration support
-pip install .[yaml]
-```
-
-Alternatively, run the module directly without installation:
-
-```bash
-python -m transfold.cli --help
-```
-
-## Usage
+## Transfold 命令用法
 
 ```bash
 transfold \
@@ -87,50 +55,33 @@ transfold \
   --concurrency 8
 ```
 
-Key arguments:
+常用参数说明：
 
-| Flag | Description |
-| ---- | ----------- |
-| `--input` | **Required.** Root directory to scan for files. |
-| `--target-lang` | **Required.** Output language code (e.g. `zh`, `en`). |
-| `--ext` | Comma-separated list of extensions (default `md`). |
-| `--output` | Optional output directory. If omitted, files are updated in place with `.bak` backups. |
-| `--source-lang` | Source language code or `auto` (default). |
-| `--model` | OpenRouter model identifier (default `openrouter/auto`). |
-| `--concurrency` | Number of in-flight OpenRouter requests (default derived from CPU count). |
-| `--max-chars` | Maximum characters per chunk before secondary splitting (default `4000`). Set `TRANSFOLD_SPLIT_THRESHOLD` in `.env` to keep smaller files as a single translation request. |
-| `--translate-code` / `--no-translate-code` | Toggle translating fenced code blocks (default disabled). |
-| `--translate-frontmatter` / `--no-translate-frontmatter` | Toggle translating YAML front matter (default disabled). |
-| `--dry-run` | Report files and segment counts without contacting the API. |
-| `--stream-writes` / `--no-stream-writes` | Opt-in partial writes after each translated segment (default disabled; buffers until document completion for best performance). |
-| `--glossary` | Path to JSON or CSV glossary mapping source terms to fixed translations. |
-| `--batch-chars` | Maximum characters combined into a single API request (default `16000`). |
-| `--batch-segments` | Maximum segments grouped per request (default `6`). |
-| `--retry`, `--timeout` | Control retry attempts and per-request timeout. |
+- `--input`：**必填**，扫描的根目录。
+- `--target-lang`：**必填**，目标语言代码（如 `zh`、`en`、`fr`）。
+- `--ext`：逗号分隔的文件扩展名，默认 `md`。
+- `--output`：输出目录，缺省时原地覆盖并生成 `.bak` 备份。
+- `--model`、`--source-lang`：指定模型与源语言（或 `auto` 自动检测）。
+- `--concurrency`、`--batch-chars`、`--batch-segments`：控制并发与批量大小。
+- `--dry-run`：仅统计待翻译文件与段落，不触发 API 调用。
+- `--glossary`：加载 JSON 或 CSV 术语库，强制特定翻译。
+- `--translate-code` / `--translate-frontmatter`：显式开启代码块或 front matter 翻译。
 
-Set the OpenRouter API key via the `OPENROUTER_API_KEY` environment variable (recommended) or pass `--api-key`. The key is never persisted to disk.
+### 包含/排除规则
 
-### Include/Exclude Patterns
+- `--include` 与 `--exclude` 支持 glob 相对路径模式，可重复使用。
+- 例如：`transfold --input docs --target-lang zh --include "**/*.md" --exclude "**/node_modules/**"`
 
-Use `--include` / `--exclude` (repeatable) for glob-style pattern filtering relative to the input directory. For example:
+### 批量回退策略
 
-```bash
-transfold --input docs --target-lang zh --include "**/*.md" --exclude "**/node_modules/**"
-```
+OpenRouter 有时会在批量响应中遗漏或重复段落。Transfold 会检测返回段落数量：
 
-### Dry Run
+1. 若段落数匹配，按批量顺序应用翻译并计入批量统计；
+2. 若不匹配，则记录原始响应、统计 token 用量，并自动逐段重新请求；
+3. 回退时仍复用同一系统提示，保证翻译风格一致；
+4. 相关行为已覆盖在 `tests/test_translator.py` 中的异步单元测试。
 
-`--dry-run` prints all candidate files and the number of translation segments without performing any API calls. This is useful for estimating workload or verifying pattern filters.
-
-### Glossary Support
-
-Provide a JSON object (`{"source": "translation"}`) or two-column CSV file to pin terminology. Glossary entries are appended to the system prompt for every translation request.
-
-## Configuration File
-
-Transfold automatically loads configuration from `transfold.config.yaml`, `.yml`, `.json` or `.toml` in the current working directory. CLI flags override config values.
-
-Example `transfold.config.yaml`:
+## 配置文件示例（`transfold.config.yaml`）
 
 ```yaml
 input: ./docs
@@ -153,22 +104,26 @@ preserve_frontmatter: true
 retry: 3
 timeout: 60
 backup: true
-
 batch:
   chars: 16000
   segments: 6
 ```
 
-## Logging & Output
+## 开发与测试
 
-During execution, Transfold displays a progress bar for translation segments, retry notifications, and a final summary with counts and (when provided by the API) token usage statistics. Failed files are listed at the end with their corresponding errors.
+- 建议使用 `python -m pytest --maxfail=1 --ff` 运行完整测试，异步用例依赖 `pytest-asyncio`。
+- 重点模块：
+  - `translate_cli/`：加载 `.env`、封装 OpenRouter 客户端，适合单次翻译。
+  - `transfold/`：批量翻译引擎，含切片、并发调度与文件写入逻辑。
+  - `tests/`：覆盖 HTTP stub、异步调度、批量解析、CLI 参数等场景。
+- 如需排查具体文件，可使用 `python -m pytest -k keyword` 精准过滤。
 
-## Development
+## 常见问题
 
-- Format and type-check using your preferred tools (no specific formatter enforced).
-- Run the CLI locally with `python -m transfold.cli --help`.
-- Contributions are welcome via pull requests.
+- **命令提示 `OpenRouter batch translation did not return the expected number of segments`**：新版 Transfold 会自动回退到单段请求，无需手动干预；若频繁出现，建议检查模型输出格式或缩减批量规模。
+- **缺少依赖**：运行 `pip install -e .[yaml]` 或根据报错安装对应包（如 `httpx`、`pytest-asyncio`）。
+- **API Key 泄露风险**：不要将 `.env` 或明文密钥提交到版本库，可通过环境变量或密钥管理服务注入。
 
-## License
+## 许可证
 
-Distributed under the MIT License. See `LICENSE` for details.
+本项目基于 MIT License 发布，详情见 `LICENSE` 文件。
