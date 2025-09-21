@@ -131,6 +131,25 @@ export function formatEta(seconds?: number | null): string {
   return `${minutes} 分 ${remaining} 秒`;
 }
 
+const TZ_SUFFIX_REGEX = /(Z|[+-]\d\d:\d\d)$/;
+
+export function parseTimestamp(value?: string | null): number | null {
+  if (!value) return null;
+  const normalized = TZ_SUFFIX_REGEX.test(value) ? value : `${value}Z`;
+  const parsed = Date.parse(normalized);
+  if (Number.isNaN(parsed)) {
+    const fallback = Date.parse(value);
+    return Number.isNaN(fallback) ? null : fallback;
+  }
+  return parsed;
+}
+
+export function formatTimestamp(value?: string | null): string {
+  const timestamp = parseTimestamp(value);
+  if (timestamp === null) return "--";
+  return new Date(timestamp).toLocaleString();
+}
+
 export function formatDuration(seconds?: number | null): string {
   if (seconds === undefined || seconds === null) return "--";
   const totalSeconds = Math.max(0, Math.floor(seconds));

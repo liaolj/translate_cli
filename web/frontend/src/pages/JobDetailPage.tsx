@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type { FileStatus } from "../api/client";
-import { formatDuration, formatEta, formatStatus, getJob, JobProgress, rerunJob } from "../api/client";
+import {
+  formatDuration,
+  formatEta,
+  formatStatus,
+  formatTimestamp,
+  getJob,
+  JobProgress,
+  parseTimestamp,
+  rerunJob
+} from "../api/client";
 
 function useJob(jobId: string | undefined) {
   const [job, setJob] = useState<JobProgress | null>(null);
@@ -51,14 +60,14 @@ function JobDetailPage() {
 
   const elapsedSeconds = useMemo(() => {
     if (!job?.started_at) return null;
-    const startedAt = new Date(job.started_at).getTime();
-    if (Number.isNaN(startedAt)) return null;
+    const startedAt = parseTimestamp(job.started_at);
+    if (startedAt === null) return null;
     const referenceTimestamp = job.finished_at
-      ? new Date(job.finished_at).getTime()
+      ? parseTimestamp(job.finished_at)
       : job.updated_at
-        ? new Date(job.updated_at).getTime()
+        ? parseTimestamp(job.updated_at)
         : null;
-    const reference = referenceTimestamp && !Number.isNaN(referenceTimestamp) ? referenceTimestamp : startedAt;
+    const reference = referenceTimestamp ?? startedAt;
     const baseDiff = (reference - startedAt) / 1000;
     const liveDiff = !job.finished_at && job.status === "running" ? (now - reference) / 1000 : 0;
     const diff = baseDiff + liveDiff;
@@ -166,7 +175,7 @@ function JobDetailPage() {
                       <td>
                         <span className={`badge ${file.status}`}>{fileStatusLabel(file.status)}</span>
                       </td>
-                      <td>{new Date(file.updated_at).toLocaleString()}</td>
+                      <td>{formatTimestamp(file.updated_at)}</td>
                       <td className="text-danger">{file.error}</td>
                     </tr>
                   ))
