@@ -12,7 +12,6 @@ try:  # pragma: no cover - optional dependency
 except ModuleNotFoundError:  # pragma: no cover - provide friendly error later
     httpx = None  # type: ignore
 
-from .cache import TranslationCache
 from .chunking import Segment
 
 
@@ -23,11 +22,11 @@ class TranslationError(RuntimeError):
 @dataclass
 class TranslatorStats:
     total_segments: int = 0
-    cached_segments: int = 0
     api_calls: int = 0
     retries: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    batches: int = 0
 
 
 RetryCallback = Callable[[int, Exception, float], Awaitable[None]]
@@ -48,7 +47,8 @@ class OpenRouterTranslator:
         timeout: float = 60.0,
         retry: int = 3,
         concurrency: int = 4,
-        cache: Optional[TranslationCache] = None,
+        max_batch_chars: int = 16000,
+        max_batch_segments: int = 8,
         glossary: Optional[dict[str, str]] = None,
         progress_callback: Optional[ProgressCallback] = None,
         retry_callback: Optional[RetryCallback] = None,
@@ -61,12 +61,14 @@ class OpenRouterTranslator:
         self.source_lang = source_lang
         self.timeout = timeout
         self.retry = retry
-        self.cache = cache
         self.glossary = glossary or {}
         self.progress_callback = progress_callback
         self.retry_callback = retry_callback
+        self._batch_delimiter = "<TRANSFOLD_SEGMENT_BREAK>"
         self.system_prompt = system_prompt or self._default_system_prompt()
         self.debug = debug
+        self.max_batch_chars = max(1, max_batch_chars)
+        self.max_batch_segments = max(1, max_batch_segments)
         if httpx is None:
             raise RuntimeError(
                 "httpx is required to use the OpenRouter translator. Install transfold with its dependencies."
@@ -85,6 +87,16 @@ class OpenRouterTranslator:
         segment_callback: Optional[SegmentCallback] = None,
     ) -> None:
         pending: list[Awaitable[None]] = []
+        batch: list[Segment] = []
+        batch_chars = 0
+
+        def flush_batch() -> None:
+            nonlocal batch, batch_chars
+            if not batch:
+                return
+            pending.append(self._translate_batch(list(batch), segment_callback))
+            batch = []
+            batch_chars = 0
 
         for segment in segments:
             if not segment.translate or not segment.content.strip():
@@ -95,61 +107,53 @@ class OpenRouterTranslator:
                 continue
 
             self.stats.total_segments += 1
-            chunk_hash = self.cache.compute_chunk_hash(segment.content) if self.cache else None
-            cache_key = (
-                self.cache.compute_cache_key(chunk_hash, self.target_lang, self.model)
-                if self.cache and chunk_hash is not None
-                else None
-            )
+            content_length = len(segment.content)
+            if (
+                batch
+                and (
+                    len(batch) >= self.max_batch_segments
+                    or batch_chars + content_length > self.max_batch_chars
+                )
+            ):
+                flush_batch()
 
-            if cache_key and self.cache:
-                cached = self.cache.get(cache_key)
-                if cached is not None:
-                    segment.translation = cached
-                    self.stats.cached_segments += 1
-                    if self.progress_callback:
-                        self.progress_callback(1)
-                    pending.append(self._emit_segment(segment_callback, segment))
-                    continue
+            batch.append(segment)
+            batch_chars += content_length
 
-            pending.append(
-                self._translate_segment(segment, chunk_hash, cache_key, segment_callback)
-            )
+        flush_batch()
 
         if not pending:
             return
 
         await asyncio.gather(*pending)
 
-    async def _translate_segment(
+    async def _translate_batch(
         self,
-        segment: Segment,
-        chunk_hash: Optional[str],
-        cache_key: Optional[str],
+        batch: List[Segment],
         segment_callback: Optional[SegmentCallback],
     ) -> None:
         last_error: Optional[Exception] = None
         for attempt in range(1, self.retry + 1):
             try:
                 async with self._semaphore:
-                    translation, usage = await self._request(segment.content)
-                segment.translation = translation
-                if cache_key and self.cache and chunk_hash:
-                    self.cache.set(
-                        cache_key,
-                        chunk_hash=chunk_hash,
-                        target_lang=self.target_lang,
-                        model=self.model,
-                        translation=translation,
-                        metadata={"source_lang": self.source_lang},
+                    translations, usage = await self._request_batch(batch)
+                if len(translations) != len(batch):
+                    raise TranslationError(
+                        "OpenRouter returned a mismatched number of translations"
                     )
                 if usage:
                     self.stats.prompt_tokens += usage.get("prompt_tokens", 0)
                     self.stats.completion_tokens += usage.get("completion_tokens", 0)
                 self.stats.api_calls += 1
+                self.stats.batches += 1
                 if self.progress_callback:
-                    self.progress_callback(1)
-                await self._emit_segment(segment_callback, segment)
+                    self.progress_callback(len(batch))
+                await asyncio.gather(
+                    *[
+                        self._apply_translation(segment_callback, segment, translation)
+                        for segment, translation in zip(batch, translations)
+                    ]
+                )
                 return
             except Exception as exc:  # broad catch to honour retry semantics
                 last_error = exc
@@ -164,7 +168,76 @@ class OpenRouterTranslator:
                 await asyncio.sleep(delay + jitter)
         raise TranslationError(str(last_error) if last_error else "Unknown error")
 
-    async def _request(self, text: str) -> tuple[str, Optional[dict]]:
+    async def _apply_translation(
+        self,
+        segment_callback: Optional[SegmentCallback],
+        segment: Segment,
+        translation: str,
+    ) -> None:
+        segment.translation = translation
+        await self._emit_segment(segment_callback, segment)
+
+    async def _request_batch(self, batch: List[Segment]) -> tuple[List[str], Optional[dict]]:
+        if len(batch) == 1:
+            translation, usage = await self._request_single(batch[0].content)
+            return [translation], usage
+
+        delimiter = self._batch_delimiter
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": self._batch_prompt(batch)},
+            ],
+        }
+        if self.debug:
+            preview = textwrap.shorten(
+                " ".join(seg.content.replace("\n", " ") for seg in batch),
+                width=120,
+                placeholder="...",
+            )
+            print(
+                f"[debug] OpenRouter batch request model={self.model} segments={len(batch)} chars={sum(len(seg.content) for seg in batch)} preview='{preview}'"
+            )
+        response = await self._client.post(self.endpoint, json=payload, headers=headers)
+        if self.debug:
+            print(
+                f"[debug] OpenRouter response status={response.status_code} request_id={response.headers.get('X-Request-Id', 'n/a')}"
+            )
+        if response.status_code >= 500 or response.status_code == 429:
+            raise httpx.HTTPStatusError(
+                f"Server error: {response.status_code} {response.text}", request=response.request, response=response
+            )
+        if response.status_code != 200:
+            raise TranslationError(
+                f"OpenRouter API returned status {response.status_code}: {response.text}"
+            )
+        data = response.json()
+        if self.debug and isinstance(data, dict):
+            usage = data.get("usage") or {}
+            print(f"[debug] OpenRouter usage={usage}")
+        try:
+            message = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as exc:  # pragma: no cover - depends on API
+            raise TranslationError("Unexpected response format from OpenRouter API") from exc
+        translations = self._parse_batch_response(message, len(batch))
+        if self.debug:
+            preview = textwrap.shorten(
+                " ".join(t.replace("\n", " ") for t in translations),
+                width=120,
+                placeholder="...",
+            )
+            print(f"[debug] OpenRouter batch translation preview='{preview}'")
+        usage = data.get("usage") if isinstance(data, dict) else None
+        return translations, usage
+
+    async def _request_single(self, text: str) -> tuple[str, Optional[dict]]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -213,6 +286,43 @@ class OpenRouterTranslator:
         usage = data.get("usage") if isinstance(data, dict) else None
         return translation, usage
 
+    def _batch_prompt(self, batch: List[Segment]) -> str:
+        source_line = (
+            f"The source language is {self.source_lang}."
+            if self.source_lang != "auto"
+            else "Detect the source language automatically."
+        )
+        parts = [
+            source_line,
+            f"The target language is {self.target_lang}.",
+            "Translate each segment independently while preserving Markdown structure.",
+            f"Return the translations in order, separated by the literal delimiter '{self._batch_delimiter}' with no extra text before the first translation or after the last translation.",
+            "Segments:",
+        ]
+        for idx, segment in enumerate(batch, start=1):
+            parts.append(f"Segment {idx} start")
+            parts.append("---")
+            parts.append(segment.content)
+            parts.append("---")
+            parts.append(f"Segment {idx} end")
+        return "\n".join(parts)
+
+    def _parse_batch_response(self, message: object, expected: int) -> List[str]:
+        text = self._normalize_content(message)
+        parts = text.split(self._batch_delimiter)
+        if len(parts) != expected:
+            raise TranslationError(
+                "OpenRouter batch translation did not return the expected number of segments"
+            )
+        results: List[str] = []
+        for item in parts:
+            if not item.strip():
+                raise TranslationError(
+                    "OpenRouter batch translation returned an empty segment"
+                )
+            results.append(item.strip("\n"))
+        return results
+
     def _normalize_content(self, message: object) -> str:
         if isinstance(message, list):
             parts: List[str] = []
@@ -245,7 +355,7 @@ class OpenRouterTranslator:
             You are a professional technical documentation translator.
             Translate all provided text into {self.target_lang} while preserving Markdown structure and formatting.
             Do not translate fenced code blocks, inline code spans, URLs, or image paths.
-            Do not add commentary or explanations; respond with the translated text only.{glossary_text}
+            Do not add commentary or explanations; respond with the translated text only. When multiple segments are provided, return translations separated by the literal delimiter '{self._batch_delimiter}'.{glossary_text}
             """
         ).strip()
 

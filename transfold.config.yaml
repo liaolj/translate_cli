@@ -1,15 +1,12 @@
-input: /home/ubuntu/gemini-balance
-output: ./output
+input: /home/ubuntu/temp/spec-kit
 target_lang: zh
-ext: [md,txt]
+ext: [md]
 concurrency: 8
-chunk:
-  strategy: markdown
-  max_chars: 4000
-  split_threshold: 8000
-preserve_code: true
+reserve_code: true
 preserve_frontmatter: true
 retry: 3
 timeout: 60
-cache_dir: ./.transfold-cache
 backup: true
+batch:
+  chars: 16000
+  segments: 6

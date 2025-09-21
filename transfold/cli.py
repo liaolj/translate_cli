@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .cache import TranslationCache
 from .chunking import SegmentedDocument, segment_document
 from .config import merge_config, load_config, load_env_file
 from .files import atomic_write, gather_files, read_glossary, read_text
@@ -23,6 +22,8 @@ DEFAULT_MODEL = "openrouter/auto"
 DEFAULT_MAX_CHARS = 4000
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_RETRY = 3
+DEFAULT_BATCH_CHARS = 16000
+DEFAULT_BATCH_SEGMENTS = 6
 
 
 @dataclass
@@ -46,10 +47,11 @@ class Settings:
     stream_writes: bool
     retry: int
     timeout: float
-    cache_dir: Path
     glossary: Optional[Path]
     api_key: str
     debug: bool
+    batch_chars: int
+    batch_segments: int
 
 
 WriteTask = tuple[Path, str, bool]
@@ -127,7 +129,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true", help="Alias for --no-backup")
     parser.add_argument("--retry", type=int, help="Maximum retry attempts", default=None)
     parser.add_argument("--timeout", type=float, help="API request timeout in seconds", default=None)
-    parser.add_argument("--cache-dir", help="Cache directory", default=None)
     parser.add_argument("--glossary", help="Glossary file (JSON or CSV)", default=None)
     parser.add_argument(
         "--stream-writes",
@@ -135,6 +136,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write translated output after each segment instead of once per document",
         default=None,
     )
+    parser.add_argument("--batch-chars", type=int, help="Maximum characters per API request batch", default=None)
+    parser.add_argument("--batch-segments", type=int, help="Maximum segments per API request batch", default=None)
     parser.add_argument("--api-key", help="OpenRouter API key", default=None)
     parser.add_argument("--debug", action="store_true", help="Print OpenRouter request/response debug information")
     return parser
@@ -265,10 +268,24 @@ def parse_arguments(argv: Optional[List[str]] = None) -> Settings:
     retry = int(merged.get("retry") or DEFAULT_RETRY)
     timeout = float(merged.get("timeout") or DEFAULT_TIMEOUT)
 
-    cache_dir = Path(merged.get("cache_dir") or merged.get("cache-dir") or ".transfold-cache").expanduser()
-
     glossary_path = merged.get("glossary")
     glossary = Path(glossary_path).expanduser() if glossary_path else None
+
+    batch_config = merged.get("batch") if isinstance(merged.get("batch"), dict) else {}
+    batch_chars = int(
+        merged.get("batch_chars")
+        or merged.get("batch-chars")
+        or (batch_config or {}).get("chars")
+        or (batch_config or {}).get("max_chars")
+        or DEFAULT_BATCH_CHARS
+    )
+    batch_segments = int(
+        merged.get("batch_segments")
+        or merged.get("batch-segments")
+        or (batch_config or {}).get("segments")
+        or (batch_config or {}).get("max_segments")
+        or DEFAULT_BATCH_SEGMENTS
+    )
 
     api_key = (
         merged.get("api_key")
@@ -299,10 +316,11 @@ def parse_arguments(argv: Optional[List[str]] = None) -> Settings:
         stream_writes=bool(stream_writes),
         retry=retry,
         timeout=timeout,
-        cache_dir=cache_dir,
         glossary=glossary,
         api_key=str(api_key),
         debug=bool(merged.get("debug") or args.debug),
+        batch_chars=batch_chars,
+        batch_segments=batch_segments,
     )
 
 
@@ -390,7 +408,6 @@ def run(settings: Settings) -> int:
         except Exception as exc:
             errors.append(f"Failed to read glossary: {exc}")
 
-    cache = TranslationCache(settings.cache_dir)
     progress: Optional[tqdm] = None
     pending_progress = 0
     total_segments = 0
@@ -421,14 +438,14 @@ def run(settings: Settings) -> int:
             timeout=settings.timeout,
             retry=settings.retry,
             concurrency=settings.concurrency,
-            cache=cache,
+            max_batch_chars=settings.batch_chars,
+            max_batch_segments=settings.batch_segments,
             glossary=glossary,
             progress_callback=on_progress,
             retry_callback=on_retry,
             debug=settings.debug,
         )
     except Exception as exc:
-        cache.close()
         print(f"Failed to initialise translator: {exc}", file=sys.stderr)
         return 1
 
@@ -520,7 +537,6 @@ def run(settings: Settings) -> int:
             except Exception as exc:
                 errors.append(f"{file_path}: {exc}")
             finally:
-                cache.flush()
                 queue.task_done()
 
     async def runner() -> None:
@@ -535,7 +551,6 @@ def run(settings: Settings) -> int:
         asyncio.run(runner())
     finally:
         writer.close()
-        cache.close()
         if progress is not None:
             progress.close()
 
@@ -545,8 +560,9 @@ def run(settings: Settings) -> int:
     print("=======")
     print(f"Files processed: {documents_to_process}")
     print(f"Segments translated: {translator.stats.total_segments}")
-    print(f"Segments served from cache: {translator.stats.cached_segments}")
     print(f"API calls: {translator.stats.api_calls}")
+    if translator.stats.batches:
+        print(f"Batches submitted: {translator.stats.batches}")
     print(f"Retries performed: {translator.stats.retries}")
     if translator.stats.prompt_tokens or translator.stats.completion_tokens:
         print(

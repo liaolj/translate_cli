@@ -55,7 +55,7 @@ Transfold is a command-line utility that recursively scans a directory tree, tra
 - Chunk-aware translation pipeline that respects Markdown structure and API character limits.
 - Concurrent OpenRouter requests with exponential backoff and retry handling.
 - Atomic file writes with optional `.bak` backups when overwriting source files.
-- Persistent SQLite cache to avoid re-translating unchanged segments.
+- Batched requests that translate multiple segments per OpenRouter call, reducing latency at scale.
 - Optional glossary ingestion (JSON or CSV) to enforce domain terminology.
 - Dry-run mode for auditing which files and segments would be processed.
 - Configurable via CLI flags or a `transfold.config.{yaml,json,toml}` file.
@@ -103,8 +103,9 @@ Key arguments:
 | `--translate-frontmatter` / `--no-translate-frontmatter` | Toggle translating YAML front matter (default disabled). |
 | `--dry-run` | Report files and segment counts without contacting the API. |
 | `--stream-writes` / `--no-stream-writes` | Opt-in partial writes after each translated segment (default disabled; buffers until document completion for best performance). |
-| `--cache-dir` | Override the cache directory (default `.transfold-cache`). |
 | `--glossary` | Path to JSON or CSV glossary mapping source terms to fixed translations. |
+| `--batch-chars` | Maximum characters combined into a single API request (default `16000`). |
+| `--batch-segments` | Maximum segments grouped per request (default `6`). |
 | `--retry`, `--timeout` | Control retry attempts and per-request timeout. |
 
 Set the OpenRouter API key via the `OPENROUTER_API_KEY` environment variable (recommended) or pass `--api-key`. The key is never persisted to disk.
@@ -151,13 +152,12 @@ preserve_code: true
 preserve_frontmatter: true
 retry: 3
 timeout: 60
-cache_dir: ./.transfold-cache
 backup: true
+
+batch:
+  chars: 16000
+  segments: 6
 ```
-
-## Cache
-
-The cache lives in `.transfold-cache/segments.sqlite3` by default and stores per-chunk translations keyed by source content, target language and model. Delete the file to force re-translation.
 
 ## Logging & Output
 
