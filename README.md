@@ -34,6 +34,22 @@ translate_cli 提供面向单条文本的命令行翻译工具，而 Transfold �
    python -m transfold.cli --input docs --target-lang es --dry-run
    ```
 
+### 启动 Web 应用
+
+后端基于 FastAPI，前端使用 React + Vite，二者通过 REST API 对接批量翻译任务：
+
+```bash
+# 后端（默认读取 .env，监听 8000 端口）
+uvicorn web.backend.app:app --reload
+
+# 前端（在 web/frontend 下）
+cd web/frontend
+npm install
+npm run dev
+```
+
+开发环境默认将 `/api` 请求代理到 `http://localhost:8000`。`DATA_ROOT` 用于指定仓库克隆、译文输出和日志存储位置，可在 `.env` 中覆盖。
+
 ## 关键环境变量
 
 | 变量名 | 说明 |
@@ -43,6 +59,7 @@ translate_cli 提供面向单条文本的命令行翻译工具，而 Transfold �
 | `OPENROUTER_BASE_URL` | 可选，自建代理或中转地址。 |
 | `OPENROUTER_SITE_URL`、`OPENROUTER_APP_NAME` | 可选，随请求发送的鉴别信息。 |
 | `TRANSFOLD_SPLIT_THRESHOLD` | 可选，低于阈值的文件不拆分，直接作为单次翻译提交。 |
+| `DATA_ROOT` | 可选，Web 后端用于克隆仓库、输出译文与存放日志的根目录，默认 `var/transfold`。 |
 
 ## Transfold 命令用法
 
@@ -66,6 +83,14 @@ transfold \
 - `--dry-run`：仅统计待翻译文件与段落，不触发 API 调用。
 - `--glossary`：加载 JSON 或 CSV 术语库，强制特定翻译。
 - `--translate-code` / `--translate-frontmatter`：显式开启代码块或 front matter 翻译。
+
+## Web 功能概览
+
+- **任务提交页**：输入 GitHub HTTPS 仓库地址、选择扩展名与可选输出目录，提交后排队执行翻译并展示最近任务。
+- **分支控制**：可在任务提交时指定 Git 分支（默认使用远端默认分支），后端使用 `git clone --depth 1 --single-branch` 拉取最新版本，避免下载全部历史。
+- **任务详情页**：实时轮询整体百分比、ETA、失败文件与日志摘要，可一键重跑并跳转至译文预览。
+- **历史记录页**：支持搜索、分页、删除记录及重新执行任务，便于长期归档与手动清理。
+- **译文预览页**：左侧目录树、右侧语法高亮内容，可直接浏览输出文件，默认选中首个译文文件。
 
 ### 包含/排除规则
 

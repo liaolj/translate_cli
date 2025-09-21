@@ -11,8 +11,11 @@ authors = [{name = "Transfold Contributors"}]
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
 dependencies = [
+    "fastapi>=0.111,<0.112",
     "httpx>=0.24,<0.28",
+    "pydantic>=2.5,<2.8",
     "tqdm>=4.66",
+    "uvicorn[standard]>=0.27,<0.29",
 ]
 
 [project.optional-dependencies]
@@ -25,4 +28,5 @@ transfold = "transfold.cli:main"
 packages = [
     "translate_cli",
     "transfold",
+    "web.backend",
 ]

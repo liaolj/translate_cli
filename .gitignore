@@ -12,3 +12,4 @@ dist/
 input/
 output/
 .transfold-cache
+data/
