@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type { FileStatus } from "../api/client";
-import { formatDuration, formatEta, formatStatus, getJob, JobProgress, rerunJob } from "../api/client";
+import {
+  formatDuration,
+  formatEta,
+  formatStatus,
+  formatTimestamp,
+  getJob,
+  JobProgress,
+  parseTimestamp,
+  rerunJob
+} from "../api/client";
 
 function useJob(jobId: string | undefined) {
   const [job, setJob] = useState<JobProgress | null>(null);
@@ -44,19 +53,26 @@ function JobDetailPage() {
 
   useEffect(() => {
     if (job?.status !== "running") return;
+    setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [job?.status]);
 
   const elapsedSeconds = useMemo(() => {
     if (!job?.started_at) return null;
-    const startedAt = new Date(job.started_at).getTime();
-    if (Number.isNaN(startedAt)) return null;
-    const finishedAt = job.finished_at ? new Date(job.finished_at).getTime() : now;
-    if (Number.isNaN(finishedAt)) return null;
-    const diff = (finishedAt - startedAt) / 1000;
+    const startedAt = parseTimestamp(job.started_at);
+    if (startedAt === null) return null;
+    const referenceTimestamp = job.finished_at
+      ? parseTimestamp(job.finished_at)
+      : job.updated_at
+        ? parseTimestamp(job.updated_at)
+        : null;
+    const reference = referenceTimestamp ?? startedAt;
+    const baseDiff = (reference - startedAt) / 1000;
+    const liveDiff = !job.finished_at && job.status === "running" ? (now - reference) / 1000 : 0;
+    const diff = baseDiff + liveDiff;
     return diff > 0 ? diff : 0;
-  }, [job?.started_at, job?.finished_at, now]);
+  }, [job?.started_at, job?.updated_at, job?.finished_at, job?.status, now]);
 
   const elapsedLabel = job?.status === "completed" ? "总耗时" : "已执行时间";
 
@@ -100,7 +116,7 @@ function JobDetailPage() {
   }
 
   return (
-    <div className="page">
+    <div className="page page--wide">
       <section className="surface">
         <header className="job-header">
           <div>
@@ -159,7 +175,7 @@ function JobDetailPage() {
                       <td>
                         <span className={`badge ${file.status}`}>{fileStatusLabel(file.status)}</span>
                       </td>
-                      <td>{new Date(file.updated_at).toLocaleString()}</td>
+                      <td>{formatTimestamp(file.updated_at)}</td>
                       <td className="text-danger">{file.error}</td>
                     </tr>
                   ))

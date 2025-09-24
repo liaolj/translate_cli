@@ -150,6 +150,10 @@ button {
   gap: 32px;
 }
 
+.page--wide {
+  max-width: none;
+}
+
 .surface {
   background: var(--surface);
   border: 1px solid var(--border-color);
@@ -446,7 +450,8 @@ textarea:focus {
 .preview-root {
   display: grid;
   grid-template-columns: clamp(220px, 22vw, 280px) minmax(0, 1fr);
-  width: min(1400px, 100%);
+  width: 100%;
+  max-width: none;
   border: 1px solid var(--border-color);
   border-radius: 18px;
   overflow: hidden;
@@ -501,20 +506,41 @@ textarea:focus {
   font-size: 14px;
 }
 
+.preview-tree .preview-tree {
+  padding-left: 16px;
+}
+
 .preview-tree__node details {
   color: var(--text-muted);
 }
 
-.preview-tree__node details > summary {
+.preview-tree__folder {
   list-style: none;
   cursor: pointer;
   font-weight: 600;
   color: var(--text-secondary);
   margin-bottom: 4px;
+  position: relative;
+  padding-left: 18px;
 }
 
-.preview-tree__node details > summary::-webkit-details-marker {
+.preview-tree__folder::-webkit-details-marker {
   display: none;
+}
+
+.preview-tree__folder::before {
+  content: "\25B8";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  transition: transform 0.2s ease;
+  color: var(--text-muted);
+}
+
+.preview-tree__node details[open] > .preview-tree__folder::before {
+  transform: translateY(-50%) rotate(90deg);
 }
 
 .preview-tree__item {

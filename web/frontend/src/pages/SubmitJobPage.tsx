@@ -56,7 +56,7 @@ function SubmitJobPage() {
   };
 
   return (
-    <div className="page">
+    <div className="page page--wide">
       <section className="surface">
         <h2 className="section-title">提交新的翻译任务</h2>
       <form onSubmit={handleSubmit} className="form-grid">

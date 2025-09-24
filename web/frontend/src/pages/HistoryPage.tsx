@@ -50,7 +50,7 @@ function HistoryPage() {
   };
 
   return (
-    <div className="page">
+    <div className="page page--wide">
       <section className="surface">
         <h2 className="section-title">任务历史</h2>
         <form onSubmit={handleSearch} className="history-search">

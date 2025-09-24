@@ -40,13 +40,18 @@ translate_cli 提供面向单条文本的命令行翻译工具，而 Transfold �
 
 ```bash
 # 后端（默认读取 .env，监听 8000 端口）
-uvicorn web.backend.app:app --reload
+python -m web.backend
 
 # 前端（在 web/frontend 下）
 cd web/frontend
 npm install
 npm run dev
 ```
+
+> **提示**：`python -m web.backend` 会在开发模式下自动启用热重载，但仅监控
+> `web/backend` 源码目录，同时忽略 `DATA_ROOT` 下的仓库与译文输出，避免出
+> 现 `OS file watch limit reached` 报错。若需关闭热重载，可设置
+> `UVICORN_RELOAD=0` 后再执行上述命令。
 
 开发环境默认将 `/api` 请求代理到 `http://localhost:8000`。`DATA_ROOT` 用于指定仓库克隆、译文输出和日志存储位置，可在 `.env` 中覆盖。
 

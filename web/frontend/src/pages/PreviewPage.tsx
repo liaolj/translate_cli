@@ -30,7 +30,8 @@ function buildTree(entries: TreeEntry[]): TreeNode {
       currentPath = currentPath ? `${currentPath}/${part}` : part;
       const isLast = index === parts.length - 1;
       const nodeKey = currentPath;
-      if (!dirMap[nodeKey]) {
+      const existing = dirMap[nodeKey];
+      if (!existing) {
         const node: TreeNode = {
           name: part,
           path: nodeKey,
@@ -42,15 +43,10 @@ function buildTree(entries: TreeEntry[]): TreeNode {
         }
         if (node.type === "directory") {
           dirMap[nodeKey] = node;
-        }
-        if (!isLast) {
-          current = dirMap[nodeKey];
+          current = node;
         }
       } else {
-        current = dirMap[nodeKey];
-      }
-      if (isLast && entry.type === "file") {
-        current.type = "file";
+        current = existing;
       }
     });
   });
@@ -176,37 +172,39 @@ function PreviewPage() {
   }
 
   return (
-    <div className="preview-root">
-      <aside className="preview-nav">
-        <div className="preview-nav__header">
-          <span className="preview-nav__title">FILES</span>
-          <Link to={`/jobs/${id}`} className="preview-nav__link">返回任务</Link>
-        </div>
-        {error && <p className="preview-nav__error">{error}</p>}
-        {entries.length === 0 ? (
-          <p className="preview-nav__placeholder">暂无译文，请等待任务完成。</p>
-        ) : (
-          <TreeView node={tree} onSelect={setSelected} active={selected} />
-        )}
-      </aside>
-      <main className="preview-main">
-        <header className="preview-main__toolbar">
-          <span className="preview-main__filename">{selected || "选择一个文件"}</span>
-          <div className="preview-tabs">
-            {(["preview", "code", "raw"] as PreviewTab[]).map((item) => (
-              <button
-                key={item}
-                type="button"
-                className={`preview-tab${tab === item ? " is-active" : ""}`}
-                onClick={() => setTab(item)}
-              >
-                {item === "preview" ? "Preview" : item === "code" ? "Code" : "Raw"}
-              </button>
-            ))}
+    <div className="page page--wide">
+      <div className="preview-root">
+        <aside className="preview-nav">
+          <div className="preview-nav__header">
+            <span className="preview-nav__title">FILES</span>
+            <Link to={`/jobs/${id}`} className="preview-nav__link">返回任务</Link>
           </div>
-        </header>
-        <section className="preview-panel">{renderPreview()}</section>
-      </main>
+          {error && <p className="preview-nav__error">{error}</p>}
+          {entries.length === 0 ? (
+            <p className="preview-nav__placeholder">暂无译文，请等待任务完成。</p>
+          ) : (
+            <TreeView node={tree} onSelect={setSelected} active={selected} />
+          )}
+        </aside>
+        <main className="preview-main">
+          <header className="preview-main__toolbar">
+            <span className="preview-main__filename">{selected || "选择一个文件"}</span>
+            <div className="preview-tabs">
+              {(["preview", "code", "raw"] as PreviewTab[]).map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  className={`preview-tab${tab === item ? " is-active" : ""}`}
+                  onClick={() => setTab(item)}
+                >
+                  {item === "preview" ? "Preview" : item === "code" ? "Code" : "Raw"}
+                </button>
+              ))}
+            </div>
+          </header>
+          <section className="preview-panel">{renderPreview()}</section>
+        </main>
+      </div>
     </div>
   );
 }
