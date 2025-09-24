@@ -24,7 +24,7 @@ translate_cli 提供面向单条文本的命令行翻译工具，而 Transfold �
    ```bash
    python -m venv .venv
    source .venv/bin/activate
-   pip install -e .[yaml]
+   pip install -e '.[yaml]'
    ```
 
 3. 验证命令行：
