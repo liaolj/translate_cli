@@ -30,7 +30,8 @@ function buildTree(entries: TreeEntry[]): TreeNode {
       currentPath = currentPath ? `${currentPath}/${part}` : part;
       const isLast = index === parts.length - 1;
       const nodeKey = currentPath;
-      if (!dirMap[nodeKey]) {
+      const existing = dirMap[nodeKey];
+      if (!existing) {
         const node: TreeNode = {
           name: part,
           path: nodeKey,
@@ -42,15 +43,10 @@ function buildTree(entries: TreeEntry[]): TreeNode {
         }
         if (node.type === "directory") {
           dirMap[nodeKey] = node;
-        }
-        if (!isLast) {
-          current = dirMap[nodeKey];
+          current = node;
         }
       } else {
-        current = dirMap[nodeKey];
-      }
-      if (isLast && entry.type === "file") {
-        current.type = "file";
+        current = existing;
       }
     });
   });
