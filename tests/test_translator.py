@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from transfold.chunking import Segment
-from transfold.translator import BatchSegmentMismatch, OpenRouterTranslator
+from transfold.translator import BatchSegmentMismatch, OpenRouterTranslator, TranslationError
 
 
 class DummyAsyncClient:
@@ -121,5 +121,40 @@ async def test_translator_falls_back_to_single_on_mismatch(monkeypatch):
     assert translator.stats.batches == 1
     assert translator.stats.prompt_tokens == 5 + len(segments)
     assert translator.stats.completion_tokens == 7 + 2 * len(segments)
+
+    await translator.close()
+
+
+@pytest.mark.asyncio
+async def test_translate_segments_times_out(monkeypatch):
+    class SlowClient:
+        def __init__(self, *_, **__):
+            return None
+
+        async def post(self, *_, **__):
+            try:
+                await asyncio.sleep(0.2)
+            except asyncio.CancelledError:
+                raise
+            raise AssertionError("Request should have timed out before completing")
+
+        async def aclose(self) -> None:
+            return None
+
+    httpx_stub = SimpleNamespace(AsyncClient=SlowClient, HTTPStatusError=RuntimeError)
+    monkeypatch.setattr("transfold.translator.httpx", httpx_stub)
+
+    translator = OpenRouterTranslator(
+        api_key="key",
+        model="model",
+        target_lang="fr",
+        timeout=0.05,
+        retry=1,
+    )
+
+    segments = [Segment(index=0, content="hello", translate=True)]
+
+    with pytest.raises(TranslationError, match="timeout"):
+        await translator.translate_segments(segments)
 
     await translator.close()

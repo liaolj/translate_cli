@@ -76,7 +76,9 @@ class OpenRouterTranslator:
         self.model = model
         self.target_lang = target_lang
         self.source_lang = source_lang
-        self.timeout = timeout
+        self.timeout = float(timeout)
+        if self.timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
         self.retry = retry
         self.glossary = glossary or {}
         self.progress_callback = progress_callback
@@ -92,10 +94,21 @@ class OpenRouterTranslator:
             raise RuntimeError(
                 "httpx is required to use the OpenRouter translator. Install transfold with its dependencies."
             )
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._client = httpx.AsyncClient(timeout=self.timeout)
         self._semaphore = asyncio.Semaphore(max(1, concurrency))
         self._pending_batches = asyncio.Semaphore(self.max_pending_batches)
         self.stats = TranslatorStats()
+        timeout_classes: list[type[BaseException]] = []
+        for candidate in (
+            getattr(httpx, "TimeoutException", None),
+            getattr(httpx, "ConnectTimeout", None),
+            getattr(httpx, "ReadTimeout", None),
+            getattr(httpx, "WriteTimeout", None),
+            getattr(httpx, "PoolTimeout", None),
+        ):
+            if isinstance(candidate, type) and issubclass(candidate, BaseException):
+                timeout_classes.append(candidate)
+        self._timeout_errors: tuple[type[BaseException], ...] = tuple(timeout_classes)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -256,11 +269,6 @@ class OpenRouterTranslator:
             translation, usage = await self._request_single(batch[0].content)
             return [translation], usage
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
         payload = {
             "model": self.model,
             "temperature": 0,
@@ -278,7 +286,7 @@ class OpenRouterTranslator:
             print(
                 f"[debug] OpenRouter batch request model={self.model} segments={len(batch)} chars={sum(len(seg.content) for seg in batch)} preview='{preview}'"
             )
-        response = await self._client.post(self.endpoint, json=payload, headers=headers)
+        response = await self._post_with_timeout(payload)
         if self.debug:
             print(
                 f"[debug] OpenRouter response status={response.status_code} request_id={response.headers.get('X-Request-Id', 'n/a')}"
@@ -314,11 +322,6 @@ class OpenRouterTranslator:
         return translations, usage
 
     async def _request_single(self, text: str) -> tuple[str, Optional[dict]]:
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
         payload = {
             "model": self.model,
             "temperature": 0,
@@ -332,7 +335,7 @@ class OpenRouterTranslator:
             print(
                 f"[debug] OpenRouter request model={self.model} target={self.target_lang} chars={len(text)} preview='{preview}'"
             )
-        response = await self._client.post(self.endpoint, json=payload, headers=headers)
+        response = await self._post_with_timeout(payload)
         if self.debug:
             print(
                 f"[debug] OpenRouter response status={response.status_code} request_id={response.headers.get('X-Request-Id', 'n/a')}"
@@ -361,6 +364,27 @@ class OpenRouterTranslator:
             print(f"[debug] OpenRouter translation preview='{preview}'")
         usage = data.get("usage") if isinstance(data, dict) else None
         return translation, usage
+
+    async def _post_with_timeout(self, payload: dict) -> "httpx.Response":
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        try:
+            return await asyncio.wait_for(
+                self._client.post(self.endpoint, json=payload, headers=headers),
+                timeout=self.timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise TranslationError(self._timeout_message()) from exc
+        except Exception as exc:
+            if self._timeout_errors and isinstance(exc, self._timeout_errors):
+                raise TranslationError(self._timeout_message()) from exc
+            raise
+
+    def _timeout_message(self) -> str:
+        return f"OpenRouter request exceeded timeout of {self.timeout:.1f} seconds"
 
     def _batch_prompt(self, batch: List[Segment]) -> str:
         source_line = (
